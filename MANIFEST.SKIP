@@ -1,6 +1,7 @@
 Build
 _build/
 blib/
+.git
 \..*\.sw[a-z]
 \.prove
 ^MYMETA\.yml$

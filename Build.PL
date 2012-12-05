@@ -8,6 +8,7 @@ Module::Build->new(
     license     => 'artistic_2',
     requires    => {
         'HTTP::Status'     => 0,
+        'List::Util'       => 0,
         'Log::Dispatch'    => 0,
         'WWW::Twilio::API' => 0,
     },

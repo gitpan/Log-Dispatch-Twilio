@@ -4,9 +4,12 @@ use strict;
 use warnings;
 use base qw(Log::Dispatch::Output);
 use HTTP::Status qw(:is);
+use List::Util qw(min);
+use POSIX qw(ceil);
 use WWW::Twilio::API;
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
+our $MAX_TWILIO_LENGTH = 160;   # max length of SMS message allowed by Twilio
 
 sub new {
     my $proto = shift;
@@ -20,12 +23,21 @@ sub new {
 sub _twilio_init {
     my $self = shift;
     my %args = @_;
+
+    # Grab and store required Twilio specific parameters
     foreach my $p (qw( account_sid auth_token from to )) {
         unless ($args{$p}) {
-            die "Log::Dispatch::Twilio requires '$p' parameter.\n";
+            die __PACKAGE__ . " requires '$p' parameter.\n";
         }
         $self->{$p} = $args{$p};
     }
+
+    # Additional parameters
+    my $max = $args{max_messages} || 1;
+    if ($max <= 0) {
+        die __PACKAGE__ . " requires 'max_messages' to be >= 1.\n";
+    }
+    $self->{max_messages} = $max;
 }
 
 sub log_message {
@@ -37,20 +49,56 @@ sub log_message {
         AuthToken  => $self->{auth_token},
     );
 
-    my $res = $twilio->POST('SMS/Messages',
-        From => $self->{from},
-        To   => $self->{to},
-        Body => $msg{message},
-    );
+    my @to_send = $self->_expand_message($msg{message});
+    foreach my $entry (@to_send) {
+        my $res = $twilio->POST('SMS/Messages',
+            From => $self->{from},
+            To   => $self->{to},
+            Body => $entry,
+        );
 
-    unless ($res) {
-        warn "Unable to send log message via Twilio; $!\n";
+        unless ($res) {
+            warn "Unable to send log message via Twilio; $!\n";
+        }
+
+        unless (is_success($res->{code})) {
+            warn "Failed to send log message via Twilio; "
+                . $res->{content} . "\n";
+        }
+    }
+}
+
+sub _expand_message {
+    my $self = shift;
+    my $msg  = shift;
+    my $max  = $self->{max_messages};
+    my @results;
+
+    # If its a long message, *and* we're configured for multiple messages,
+    # generate multiple messages.
+    my $msg_length = length($msg);
+    if (($max > 1) && ($msg_length > $MAX_TWILIO_LENGTH)) {
+        # Figure out how many messages we're actually going to generate
+        my $max_prefix_length = length("$max/$max: ");
+        my $how_much          = $MAX_TWILIO_LENGTH - $max_prefix_length;
+        my $num_messages      = min($max, ceil($msg_length / $how_much));
+
+        # Create entries w/prefixes
+        for my $idx (1 .. $max) {
+            my $prefix = "$idx/$max: ";
+            my $entry = substr($msg, 0, $how_much, '');
+            $entry =~ s{^\s+|\s+$}{}g;  # trim leading/trailing ws
+            push @results, $prefix . $entry;
+        }
+    }
+    # Otherwise, its just a single message.
+    else {
+        my $entry = substr($msg, 0, $MAX_TWILIO_LENGTH, '');
+        $entry =~ s{^\s+|\s+$}{}g;  # trim leading/trailing ws
+        push @results, $entry;
     }
 
-    unless (is_success($res->{code})) {
-        warn "Failed to send log message via Twilio; "
-            . $res->{content} . "\n";
-    }
+    return @results;
 }
 
 1;
@@ -110,6 +158,17 @@ This number must be a number attached to your Twilio account.
 =item to
 
 The telephone number to which the SMS messages will be sent to.
+
+=back
+
+=head2 Additional Options
+
+=over
+
+=item max_messages (default 1)
+
+Maximum number of SMS messages that can be generated from a single logged
+item.  Defaults to 1.
 
 =back
 
